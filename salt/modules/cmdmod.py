@@ -182,7 +182,11 @@ def _run(cmd,
     ret['stderr'] = err
     ret['pid'] = proc.pid
     ret['retcode'] = proc.returncode
-    return ret
+
+    if ret['retcode'] == 0:
+        return ret
+    else:
+        raise CommandExecutionError(ret)
 
 
 def _run_quiet(cmd, cwd=None, runas=None, shell=DEFAULT_SHELL, env=()):
