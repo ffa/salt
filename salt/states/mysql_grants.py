@@ -51,6 +51,7 @@ def __virtual__():
 
 
 def present(name,
+            privileges=None,
             grant=None,
             database=None,
             user=None,
@@ -63,7 +64,8 @@ def present(name,
     name
         The name (key) of the grant to add
 
-    grant
+    privileges
+    grant (depreciated)
         The grant priv_type (ie. select,insert,update OR all privileges)
 
     database
@@ -78,19 +80,24 @@ def present(name,
     grant_option
         Adds the WITH GRANT OPTION to the defined grant. default: False
 
-    excape
+    escape
         Defines if the database value gets escaped or not. default: True
     '''
+    if privileges is None and grant is not None:
+        privileges = grant
+
     comment = 'Grant {0} on {1} to {2}@{3} is already present'
     ret = {'name': name,
            'changes': {},
            'result': True,
-           'comment': comment.format(grant, database, user, host)
+           'comment': comment.format(privileges, database, user, host)
            }
+
     # check if grant exists
-    if __salt__['mysql.grant_exists'](
-        grant, database, user, host, grant_option, escape
-    ):
+    grant_exists = __salt__['mysql.grant_exists'](
+        privileges, database, user, host, grant_option, escape
+    )
+    if grant_exists is True:
         return ret
 
     # The grant is not present, make it!
@@ -98,20 +105,34 @@ def present(name,
         ret['result'] = None
         ret['comment'] = 'MySQL grant {0} is set to be created'.format(name)
         return ret
+
+    if grant_exists is None:
+        if __salt__['mysql.grant_revoke'](
+                "ALL PRIVILEGES",
+                database,
+                user,
+                host,
+                grant_option) is False:
+            ret['comment'] = ('Failed to remove previous grant before applying new'
+                            ' grant: "GRANT {0} ON {1} TO {2}@{3}"'
+                            ''.format(privileges, database, user, host))
+            ret['result'] = False
+
     if __salt__['mysql.grant_add'](
-        grant, database, user, host, grant_option, escape
+        privileges, database, user, host, grant_option, escape
     ):
         ret['comment'] = 'Grant {0} on {1} to {2}@{3} has been added'
-        ret['comment'] = ret['comment'].format(grant, database, user, host)
+        ret['comment'] = ret['comment'].format(privileges, database, user, host)
         ret['changes'][name] = 'Present'
     else:
         ret['comment'] = 'Failed to execute: "GRANT {0} ON {1} TO {2}@{3}"'
-        ret['comment'] = ret['comment'].format(grant, database, user, host)
+        ret['comment'] = ret['comment'].format(privileges, database, user, host)
         ret['result'] = False
     return ret
 
 
 def absent(name,
+           privileges=None,
            grant=None,
            database=None,
            user=None,
@@ -124,8 +145,13 @@ def absent(name,
     name
         The name (key) of the grant to add
 
-    grant
+    privileges
+    grant (depreciated)
         The grant priv_type (ie. select,insert,update OR all privileges)
+
+        Note: The privileges must be exact to remove the grant. Alternatively,
+              use "ALL PRIVILEGES" if the privileges are unknown to remove the
+              grant.
 
     database
         The database priv_level (ie. db.tbl OR db.*)
@@ -141,9 +167,12 @@ def absent(name,
            'result': True,
            'comment': ''}
 
+    if privileges is None and grant is not None:
+        privileges = grant
+
     #check if db exists and remove it
     if __salt__['mysql.grant_exists'](
-            grant,
+            privileges,
             database,
             user, host,
             grant_option,
@@ -155,20 +184,20 @@ def absent(name,
             ret['comment'] = ret['comment'].format(name)
             return ret
         if __salt__['mysql.grant_revoke'](
-                grant,
+                privileges,
                 database,
                 user,
                 host,
                 grant_option):
             ret['comment'] = 'Grant {0} on {1} for {2}@{3} has been revoked'
-            ret['comment'].format(grant, database, user, host)
+            ret['comment'].format(privileges, database, user, host)
             ret['changes'][name] = 'Absent'
             return ret
 
     # fallback
     ret['comment'] = ('Grant {0} on {1} to {2}@{3} is not present, so it'
                       ' cannot be revoked').format(
-                              grant,
+                              privileges,
                               database,
                               user,
                               host

@@ -624,20 +624,19 @@ def db_optimize(name,
 
 
 # Grants
-def __grant_generate(grant,
+def __grant_format(privileges,
                     database,
                     user,
                     host='localhost',
                     grant_option=False,
                     escape=True):
-    # TODO: Re-order the grant so it is according to the
-    #       SHOW GRANTS for xxx@yyy query (SELECT comes first, etc)
-    grant = re.sub(r'\s*,\s*', ', ', grant).upper()
 
     # MySQL normalizes ALL to ALL PRIVILEGES, we do the same so that
     # grant_exists and grant_add ALL work correctly
-    if grant == 'ALL':
-        grant = 'ALL PRIVILEGES'
+    if privileges == 'ALL':
+        privileges = 'ALL PRIVILEGES'
+    else:
+        privileges = re.sub(r'\s*,\s*', ', ', privileges).upper()
 
     db_part = database.rpartition('.')
     db = db_part[0]
@@ -648,11 +647,37 @@ def __grant_generate(grant,
             db = '`{0}`'.format(db)
         if table is not '*':
             table = '`{0}`'.format(table)
-    query = 'GRANT {0} ON {1}.{2} TO \'{3}\'@\'{4}\''.format(
-        grant, db, table, user, host
-    )
+
+    grant_on = '{0}.{1}'.format(db, table)
+
+    grant_to = '\'{0}\'@\'{1}\''.format(user, host)
+
+    grant_with = ''
     if grant_option:
-        query += ' WITH GRANT OPTION'
+        grant_with += ' WITH GRANT OPTION'
+
+    return privileges, grant_on, grant_to, grant_with
+
+def __grant_generate(privileges,
+                    database,
+                    user,
+                    host='localhost',
+                    grant_option=False,
+                    escape=True):
+
+    privileges,
+    grant_on,
+    grant_to,
+    grant_with = __grant_format(privileges,
+                                database,
+                                user,
+                                host=host,
+                                grant_option=grant_option,
+                                escape=escape)
+
+    query = 'GRANT {0} ON {1} TO {2}{3}'.format(
+        privileges, grant_on, grant_to, grant_with
+    )
     log.debug('Query generated: {0}'.format(query))
     return query
 
@@ -684,29 +709,58 @@ def user_grants(user,
     return ret
 
 
-def grant_exists(grant,
+def grant_exists(privileges,
                 database,
                 user,
                 host='localhost',
                 grant_option=False,
                 escape=True):
-    # TODO: This function is a bit tricky, since it requires the ordering to
-    #       be exactly the same. Perhaps should be replaced/reworked with a
-    #       better/cleaner solution.
-    target = __grant_generate(
-        grant, database, user, host, grant_option, escape
-    )
+    # This does not cover inheritance, like from anonymous user grants
 
     grants = user_grants(user, host)
-    if grants is not False and target in grants:
-        log.debug('Grant exists.')
-        return True
+    if grants is not False:
+        log.debug('Grants exists.')
 
-    log.debug('Grant does not exist, or is perhaps not ordered properly?')
+        privileges,
+        grant_on,
+        grant_to,
+        grant_with = __grant_format(privileges,
+                                    database,
+                                    user,
+                                    host=host,
+                                    grant_option=grant_option,
+                                    escape=escape)
+        match_grant = re.compile(r"GRANT (.+?) ON (.+?) TO (.+?)( IDENTIFIED BY (.+?))?( REQUIRE (.+?))?( WITH (.+?))?$")
+        granted_privileges = []
+
+        for g in grants:
+            g_matches = match_grant.match(g)
+            if g_matches is None:
+                log.error('The return from `GRANT SHOW` did not match the regex'
+                        ': {0}'.format(g))
+            else:
+                # TODO: A small chance "SHOW GRANTS" is lowercasing the db and
+                # tbl names...?
+                if grant_on == g_matches.group(2):
+                    log.debug('Grant found for db and table: {0}'.format(g))
+
+                    granted_privileges.extend(g_matches.group(1).split(", "))
+
+        if 'USAGE' in granted_privileges:
+            privileges.append('USAGE')
+
+        if set(granted_privileges) == set(privileges):
+            log.debug('Grant matches')
+            return True
+
+        log.debug('Grant exists, but does not match')
+        return None
+
+    log.debug('Grant does not exist')
     return False
 
 
-def grant_add(grant,
+def grant_add(privileges,
               database,
               user,
               host='localhost',
@@ -721,30 +775,30 @@ def grant_add(grant,
 
         salt '*' mysql.grant_add 'SELECT,INSERT,UPDATE,...' 'database.*' 'frank' 'localhost'
     '''
-    # todo: validate grant
+    # todo: validate privileges
     db = connect()
     cur = db.cursor()
 
-    query = __grant_generate(grant, database, user, host, grant_option, escape)
+    query = __grant_generate(privileges, database, user, host, grant_option, escape)
     log.debug('Query: {0}'.format(query))
     cur.execute(query)
-    if grant_exists(grant, database, user, host, grant_option, escape):
+    if grant_exists(privileges, database, user, host, grant_option, escape):
         log.info(
             'Grant \'{0}\' on \'{1}\' for user \'{2}\' has been added'.format(
-                grant, database, user
+                privileges, database, user
             )
         )
         return True
 
     log.info(
         'Grant \'{0}\' on \'{1}\' for user \'{2}\' has NOT been added'.format(
-            grant, database, user
+            privileges, database, user
         )
     )
     return False
 
 
-def grant_revoke(grant,
+def grant_revoke(privileges,
                  database,
                  user,
                  host='localhost',
@@ -752,6 +806,10 @@ def grant_revoke(grant,
                  escape=True):
     '''
     Removes a grant from the MySQL server.
+
+    Note:
+    The grant privileges must be defined exactly to remove the grant. So, if
+    the grant is unknown, use "ALL PRIVILEGES" to delete the grant.
 
     CLI Example::
 
@@ -761,22 +819,29 @@ def grant_revoke(grant,
     db = connect()
     cur = db.cursor()
 
-    if grant_option:
-        grant += ', GRANT OPTION'
-    query = 'REVOKE {0} ON {1} FROM \'{2}\'@\'{3}\';'.format(
-        grant, database, user, host
+    privileges,
+    grant_on,
+    grant_to,
+    grant_with = __grant_format(privileges,
+                                database,
+                                user,
+                                host=host,
+                                grant_option=grant_option,
+                                escape=escape)
+    query = 'REVOKE {0} ON {1} FROM {2};'.format(
+        privileges, grant_on, grant_to
     )
     log.debug('Query: {0}'.format(query))
     cur.execute(query)
-    if not grant_exists(grant, database, user, host, grant_option, escape):
+    if not grant_exists(privileges, database, user, host, grant_option, escape):
         log.info(
             'Grant \'{0}\' on \'{1}\' for user \'{2}\' has been '
-            'revoked'.format(grant, database, user)
+            'revoked'.format(privileges, database, user)
         )
         return True
 
     log.info(
         'Grant \'{0}\' on \'{1}\' for user \'{2}\' has NOT been '
-        'revoked'.format(grant, database, user)
+        'revoked'.format(privileges, database, user)
     )
     return False
